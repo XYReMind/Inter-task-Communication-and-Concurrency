@@ -1,4 +1,5 @@
 // Use this to see if a number has an integer square root
+// Wrote by h536wang, with help from j67cao
 #define EPS 1.E-7
 
 
@@ -15,20 +16,19 @@
 #include <math.h>
 
 double g_time[2];
-int KILLSIG = -1;
-const char* QUEUE_NAME = "/lab3_queue";
+const char* My_Queue = "/lab3_my_msg_queue";
+int num;
+int bufferSize;
+int num_p;
+int num_c;
 
-int spawn_producer(int pid, int num, int num_p, int buffer_size);
-int spawn_consumer(int cid, int buffer_size);
-void producer_task(int id, int int_num, int num_p, int buffer_size);
-void consumer_task(int cid, int buffer_size);
+int EXT_SIG = -1;
+
+void producer_task(int pid);
+void consumer_task(int cid);
 
 int main(int argc, char *argv[])
 {
-	int num;
-	int maxmsg;
-	int num_p;
-	int num_c;
 	int i;
 	struct timeval tv;
 
@@ -37,8 +37,8 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	num = atoi(argv[1]);	/* number of items to produce */
-	maxmsg = atoi(argv[2]); /* buffer size                */
+	num = atoi(argv[1]);	/* number of items to produce   */
+	bufferSize = atoi(argv[2]); /* buffer size            */
 	num_p = atoi(argv[3]);  /* number of producers        */
 	num_c = atoi(argv[4]);  /* number of consumers        */
 
@@ -48,57 +48,76 @@ int main(int argc, char *argv[])
 
 	struct mq_attr attribute;
     mqd_t qdes;    
-    attribute.mq_maxmsg = maxmsg;
+    attribute.mq_maxmsg = bufferSize;
     attribute.mq_msgsize = sizeof(int);
     attribute.mq_flags = 0;
     attribute.mq_curmsgs = 0;
 
-    
-    qdes = mq_open(QUEUE_NAME, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR, &attribute);
+    qdes = mq_open(My_Queue, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR, &attribute);
+	
     if (qdes == -1 ) {
-        perror("main: mq_open() failed");
+        perror("mq_open() Failed! Exit!");
         exit(1);
     }
+		
 	pid_t* producer_id = malloc(num_p * sizeof( pid_t ));
 	pid_t* consumer_id = malloc(num_c * sizeof( pid_t ));
 
+		// fork producers
     for(i = 0; i< num_p; i++){
     	producer_id[i] = fork();
+			
     	if(	producer_id[i] == 0){
-    		producer_task(i, num, num_p, maxmsg);
+    		producer_task(i);
     		exit(0);
     	}
     }
+		
+		// fork consumers
     for(i = 0; i< num_c; i++){
     	consumer_id[i] = fork();
+			
     	if(consumer_id[i] == 0){
-    		consumer_task(i, maxmsg);
+    		consumer_task(i);
     		exit(0);
-    	}
-    	
+    	}	
     }
-    int child_status;
+		
+    int child_process;
+	
+		// wait for producers to finish up
     for(i = 0; i< num_p; i++){
-        waitpid(producer_id[i], &child_status, 0);
+        waitpid(producer_id[i], &child_process, 0);
     }
+		
+		// terminate consumers after reading the numbers 
+		// since we have a while(msg != -1) in the consumer_task function
+		// we do not have to check if the Buffer is empty by ourselves
     for(i = 0; i < num_c; ++i) {
-		if(mq_send(qdes, (char *)&KILLSIG, sizeof(int), 0) == -1) {
-			perror("Main Program: Terminate Consumer failed.");
-			exit(1);
-		}
-	}    
+			if(mq_send(qdes, (char *)&EXT_SIG, sizeof(int), 0) == -1) {
+				perror("Terminate Consumer Failed! Exit!");
+				exit(1);
+			}
+		}    
+		
+		// wait for consumers to finish up
     for(i = 0; i< num_c; i++){
-        waitpid(consumer_id[i], &child_status, 0);
+        waitpid(consumer_id[i], &child_process, 0);
     }
+		
+		// close
     if(mq_close(qdes) == -1) {
-        perror("main : mq_close() failed");
+        perror("mq_close() Failed! Exit!");
         exit(1);
     }
-    if(mq_unlink(QUEUE_NAME) != 0){
-    	perror("main: mq_unlink() failed");
+		
+		// inlink
+    if(mq_unlink(My_Queue) != 0){
+    	perror("mq_unlink() Failed! Exit!");
         exit(1);
     }
     
+		// free memory
     free(producer_id);
     free(consumer_id);
     
@@ -108,53 +127,69 @@ int main(int argc, char *argv[])
 
     printf("System execution time: %.6lf seconds\n", \
             g_time[1] - g_time[0]);
+		
     return 0;
 }
-void producer_task(int pid, int int_num, int num_p, int buffer_size){
+
+void producer_task(int pid){
 	int i;
-	mqd_t msg_queue = mq_open(QUEUE_NAME, O_WRONLY);
-	if (msg_queue == -1 ) {
-		perror("producer: mq_open() failed");
+	
+	// open write only
+	mqd_t pro_msg_queue = mq_open(My_Queue, O_WRONLY);
+	if (pro_msg_queue == -1 ) {
+		perror("Pro: mq_open() Failed! Exit!");
 		exit(1);
 	}
-    for(i = 0; i < int_num; i++){
-        if(i % num_p == pid){
-        	if (mq_send(msg_queue, (char *)&i, sizeof(int), 0) == -1) {
-            	perror("producer: mq_send() failed");
-	        }
-        }
-    }
-    if (mq_close(msg_queue) == -1) {
-        perror("producer: mq_close() failed");
-        exit(2);
-    }
-    exit(0);
+	
+	// generate numbers and send the numbers to the queue
+	for(i = 0; i < num; i++){
+			if(i % num_p == pid){
+				if (mq_send(pro_msg_queue, (char *)&i, sizeof(int), 0) == -1) {
+						perror("Pro: mq_send() Failed! Exit!");
+				}
+			}
+	}
+	
+	// close
+	if (mq_close(pro_msg_queue) == -1) {
+			perror("Pro: mq_close() Failed! Exit!");
+			exit(1);
+	}
+	
+  exit(0);
 }
-void consumer_task(int cid, int buffer_size){
-	mqd_t msg_queue = mq_open(QUEUE_NAME, O_RDONLY);
-    if (msg_queue == -1 ) {
-        perror("consumer: mq_open() failed");
-        exit(1);
-    }
+
+void consumer_task(int cid){
+	
+	// open read only
+	mqd_t con_msg_queue = mq_open(My_Queue, O_RDONLY);
+	if (con_msg_queue == -1 ) {
+			perror("Con: mq_open() Failed! Exit!");
+			exit(1);
+	}
     
-    int msg = 0;
-    
-    while (msg != -1) {
-        if (mq_receive(msg_queue, (char *)&msg, sizeof(int), 0) == -1) {
-            perror("consumer: mq_receive() failed");
-            exit(1);
-        }
-        int root = sqrt((double)msg);
-        if(root == sqrt((double)msg)) {
-            printf("%d %d %d\n", cid, msg, root);
-        }
-    }
-    if (mq_close(msg_queue) == -1) {
-        perror("consumer: mq_close() failed");
-        exit(2);
-    }
-    exit(0);
-    
+	int msg = 0;
+	
+	// while still have msg to read, do not exit the while loop
+	while (msg != -1) {
+		if (mq_receive(con_msg_queue, (char *)&msg, sizeof(int), 0) == -1) {
+				perror("Consumer: mq_receive() Failed! Exit!");
+				exit(1);
+		}
+		
+		int root = sqrt((double)msg);
+		if(root == sqrt((double)msg)) {
+				printf("%d %d %d\n", cid, msg, root);
+		}
+	}
+	
+	// finish reading and checking, close
+	if (mq_close(con_msg_queue) == -1) {
+			perror("Consumer: mq_close() Failed! Exit!");
+			exit(2);
+	}
+	
+	exit(0);
 }
 
 
